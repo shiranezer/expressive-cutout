@@ -69,13 +69,11 @@ internal object SamsungClockTimerCompat {
             CutoutSignal.Notification.Action(label, intent)
         }
         val hasPause = notification.actions.orEmpty().any { action ->
-            action.semanticAction == Notification.Action.SEMANTIC_ACTION_PAUSE ||
                 action.title?.toString()?.lowercase(Locale.ROOT)?.let { title ->
                     title.contains("pause") || title.contains("השהה")
                 } == true
         }
         val hasResume = notification.actions.orEmpty().any { action ->
-            action.semanticAction == Notification.Action.SEMANTIC_ACTION_PLAY ||
                 action.title?.toString()?.lowercase(Locale.ROOT)?.let { title ->
                     title.contains("resume") || title.contains("continue") || title.contains("המשך")
                 } == true
