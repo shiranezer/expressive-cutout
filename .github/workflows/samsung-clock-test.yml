@@ -29,10 +29,10 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Check the patch against this source version
-        run: python3 apply_samsung_clock_fix.py --check
+        run: python3 apply_samsung_clock_fix_v2.py --check
 
       - name: Apply the Samsung Clock compatibility patch
-        run: python3 apply_samsung_clock_fix.py
+        run: python3 apply_samsung_clock_fix_v2.py
 
       - name: Confirm generated adapter and separate debug app ID
         run: |
