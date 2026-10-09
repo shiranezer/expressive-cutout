@@ -1,0 +1,51 @@
+name: Samsung Clock — Test APK
+
+on:
+  push:
+    branches:
+      - fix/samsung-clock-timer
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-samsung-test:
+    name: Patch and build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out the experiment branch
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Check the patch against this source version
+        run: python3 apply_samsung_clock_fix.py --check
+
+      - name: Apply the Samsung Clock compatibility patch
+        run: python3 apply_samsung_clock_fix.py
+
+      - name: Confirm generated adapter and separate debug app ID
+        run: |
+          test -f app/src/main/java/com/ekoehler/expressivecutout/events/SamsungClockTimerCompat.kt
+          grep -Fq 'applicationIdSuffix = ".samsungtest"' app/build.gradle.kts
+
+      - name: Build test APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload Samsung Clock test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: expressive-cutout-samsung-clock-test
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
