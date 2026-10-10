@@ -23,6 +23,7 @@ import com.ekoehler.expressivecutout.data.AppPreferences
 import com.ekoehler.expressivecutout.data.DynamicTilePreferences
 import com.ekoehler.expressivecutout.overlay.loadImageBitmapOrNull
 import com.ekoehler.expressivecutout.overlay.toArtImageBitmap
+import com.ekoehler.expressivecutout.permissions.Permissions
 import com.ekoehler.expressivecutout.service.CutoutNotificationListenerService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,7 +38,7 @@ import kotlinx.coroutines.launch
  * in sync with the current session (title, artist, album art, play/pause state and a transport
  * handle) and republishes a [CutoutSignal.Music] whenever playback starts or the track changes, so
  * the island pops up. Access to media sessions is granted by the app's already-required
- * notification-listener binding — no extra permission is needed. Like [SystemEventMonitor], all
+ * notification-listener access — no extra permission is needed. Like [SystemEventMonitor], all
  * registration is dynamic and lives and dies with the hosting service.
  */
 class MediaPlaybackMonitor(private val context: Context) {
@@ -66,17 +67,24 @@ class MediaPlaybackMonitor(private val context: Context) {
     /** Whether the active-sessions listener is registered with Android. */
     private var registered = false
 
+    /** The bounded registration retry currently in flight, if any. */
+    private var registrationJob: Job? = null
+
     private val sessionsListener =
         MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
             rebind(controllers.orEmpty())
         }
 
     /**
-     * Begins watching the active media sessions and the tile's own enabled flag. Does nothing
-     * without notification access, since the session manager is unavailable until then.
+     * Begins watching the active media sessions and the tile's own enabled flag. Registration waits
+     * for notification access when it has not been granted yet.
      */
     fun start() {
-        val manager = sessionManager ?: return
+        val manager = sessionManager
+        if (manager == null) {
+            Log.w(TAG, "MediaSessionManager is unavailable; music monitoring cannot start")
+            return
+        }
         scope.launch {
             dynamicTilePreferences.enabled.collect { enabled ->
                 tileEnabled = enabled
@@ -92,9 +100,13 @@ class MediaPlaybackMonitor(private val context: Context) {
         }
         scope.launch {
             CutoutNotificationListenerService.bound.collect { bound ->
-                if (bound) {
-                    register(manager)
+                val accessGranted = Permissions.isNotificationAccessGranted(context)
+                Log.i(TAG, "Notification listener bound=$bound accessGranted=$accessGranted")
+                if (shouldRegisterMediaSessions(bound, accessGranted)) {
+                    requestRegistration(manager)
                 } else {
+                    registrationJob?.cancel()
+                    registrationJob = null
                     unregister(manager)
                 }
             }
@@ -106,24 +118,50 @@ class MediaPlaybackMonitor(private val context: Context) {
      * nothing behind on the island.
      */
     fun stop() {
+        registrationJob?.cancel()
+        registrationJob = null
         sessionManager?.let(::unregister)
         scope.coroutineContext.cancelChildren()
         clearPendingShow()
         NowPlayingBus.update(null)
     }
 
-    private fun register(manager: MediaSessionManager) {
-        if (registered) return
-        runCatching {
+    /**
+     * Starts one bounded retry sequence. A listener can be enabled while its service is unbound, and
+     * Android still authorises media-session access in that state, so
+     * [CutoutNotificationListenerService.bound] is a retry signal rather than an access gate.
+     */
+    private fun requestRegistration(manager: MediaSessionManager) {
+        if (registered || registrationJob?.isActive == true) return
+        registrationJob = scope.launch {
+            val success = retryMediaSessionRegistration(REGISTRATION_RETRY_DELAYS_MS) { attempt ->
+                register(manager, attempt)
+            }
+            if (!success) {
+                Log.w(TAG, "Media session registration exhausted ${REGISTRATION_RETRY_DELAYS_MS.size} attempts")
+            }
+        }
+    }
+
+    /** Tries to register once, cleaning up a partially-added listener before a later retry. */
+    private fun register(manager: MediaSessionManager, attempt: Int): Boolean {
+        if (registered) return true
+        return runCatching {
             manager.addOnActiveSessionsChangedListener(sessionsListener, listenerComponent)
             val controllers = manager.getActiveSessions(listenerComponent)
             registered = true
             rebind(controllers)
+            Log.i(
+                TAG,
+                "Media sessions registered on attempt=$attempt active=${controllers.size} " +
+                    "packages=${controllers.joinToString { it.packageName }}",
+            )
+            true
         }.onFailure { error ->
             registered = false
             runCatching { manager.removeOnActiveSessionsChangedListener(sessionsListener) }
-            Log.w(TAG, "Media session access unavailable", error)
-        }
+            Log.w(TAG, "Media session registration attempt=$attempt failed", error)
+        }.getOrDefault(false)
     }
 
     private fun unregister(manager: MediaSessionManager) {
@@ -134,6 +172,8 @@ class MediaPlaybackMonitor(private val context: Context) {
         watched.forEach { (controller, callback) -> controller.unregisterCallback(callback) }
         watched.clear()
         NowPlayingBus.update(null)
+        clearPendingShow()
+        Log.i(TAG, "Media sessions unregistered")
     }
 
     /** Forgets the surfaced track and drops any pop still waiting to fire. */
@@ -145,6 +185,11 @@ class MediaPlaybackMonitor(private val context: Context) {
 
     /** Attach callbacks to newly active sessions and detach ones that have gone away. */
     private fun rebind(controllers: List<MediaController>) {
+        Log.d(
+            TAG,
+            "Active sessions changed count=${controllers.size} states=" +
+                controllers.joinToString { "${it.packageName}:${it.playbackState?.state ?: "none"}" },
+        )
         val current = controllers.toSet()
         watched.keys.filter { it !in current }.toList().forEach(::detach)
 
@@ -190,18 +235,24 @@ class MediaPlaybackMonitor(private val context: Context) {
      * Publishes its live state to [NowPlayingBus] and pops the island when a new track starts.
      */
     private fun sync() {
+        val disabledControllers = watched.keys.filter { it.packageName in disabledApps }
+        val assistantControllers = watched.keys.filter { isAssistantPackage(it.packageName) }
         val validControllers = watched.keys.filter { controller ->
-            if (controller.packageName in disabledApps) {
-                false
-            } else if (isAssistantPackage(controller.packageName)) {
-                // If Assistant tile is turned off, ignore assistant media session entirely
-                tileEnabled[DynamicTile.ASSISTANT] != false
-            } else {
-                true
-            }
+            isEligibleMusicSession(
+                isDisabled = controller in disabledControllers,
+                isAssistant = controller in assistantControllers,
+            )
         }
 
         val primary = validControllers.firstOrNull { it.isPlaying } ?: validControllers.firstOrNull()
+        Log.d(
+            TAG,
+            "Session selection watched=${watched.size} eligible=${validControllers.size} " +
+                "disabled=${disabledControllers.joinToString { it.packageName }} " +
+                "assistants=${assistantControllers.joinToString { it.packageName }} " +
+                "musicTileEnabled=${tileEnabled[DynamicTile.MUSIC] != false} " +
+                "primary=${primary?.packageName ?: "none"} state=${primary?.playbackState?.state ?: "none"}",
+        )
         if (primary == null) {
             NowPlayingBus.update(null)
             clearPendingShow()
@@ -254,6 +305,11 @@ class MediaPlaybackMonitor(private val context: Context) {
         val key = "${primary.packageName}|$title|$artist"
         if (key == lastShownKey) return
         lastShownKey = key
+        Log.i(
+            TAG,
+            "Scheduling music signal package=${primary.packageName} " +
+                "hasTitle=${title != null} hasArtist=${artist != null}",
+        )
         // Held briefly rather than emitted here: players routinely report STATE_PLAYING a tick or two
         // before publishing the track, so the same start arrives first as "no metadata" and then as
         // the real title — two different keys, which read as two tracks starting and would leave the
@@ -268,6 +324,7 @@ class MediaPlaybackMonitor(private val context: Context) {
         showJob?.cancel()
         showJob = scope.launch {
             delay(SHOW_DEBOUNCE_MS)
+            Log.i(TAG, "Emitting music signal package=${signal.packageName}")
             IslandEventBus.emit(signal)
         }
     }
@@ -358,5 +415,8 @@ class MediaPlaybackMonitor(private val context: Context) {
          * that a real track change still feels immediate.
          */
         const val SHOW_DEBOUNCE_MS = 250L
+
+        /** Registration attempts: immediate, then three short retries for framework bind races. */
+        val REGISTRATION_RETRY_DELAYS_MS = listOf(0L, 250L, 1_000L, 3_000L)
     }
 }

@@ -1,10 +1,12 @@
 package com.ekoehler.expressivecutout.events
 
 import android.app.Notification
+import android.content.Context
 import android.os.Bundle
 import android.os.SystemClock
 import android.service.notification.StatusBarNotification
 import com.ekoehler.expressivecutout.core.CutoutSignal
+import com.ekoehler.expressivecutout.core.RunningTimer
 
 /**
  * Everything the timer tile needs, pulled out of a clock app's ongoing count-down notification.
@@ -33,6 +35,14 @@ data class ParsedTimer(
  * never mistakes a call, whose chronometer counts *up*, for a timer.
  */
 object TimerNotificationParser {
+
+    /** Reads any supported timer format, including Samsung Clock's OEM RemoteViews. */
+    fun tryParse(
+        sbn: StatusBarNotification,
+        context: Context,
+        previous: RunningTimer? = null,
+    ): ParsedTimer? =
+        if (isTimer(sbn)) parse(sbn) else SamsungClockTimerCompat.tryParse(sbn, context, previous)
 
     /**
      * Whether this notification is a countdown timer, by either the modern metric extras or the
