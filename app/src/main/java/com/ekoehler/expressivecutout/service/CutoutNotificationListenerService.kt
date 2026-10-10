@@ -31,6 +31,7 @@ import com.ekoehler.expressivecutout.core.RunningTimerBus
 import com.ekoehler.expressivecutout.data.BehaviourPreferences
 import com.ekoehler.expressivecutout.data.BehaviourSettings
 import com.ekoehler.expressivecutout.events.CallNotificationParser
+import com.ekoehler.expressivecutout.events.ParsedTimer
 import com.ekoehler.expressivecutout.events.TimerNotificationParser
 import com.ekoehler.expressivecutout.overlay.NotificationHeaderResolver
 import com.ekoehler.expressivecutout.system.AppLocale
@@ -189,6 +190,7 @@ class CutoutNotificationListenerService : NotificationListenerService() {
         _bound.value = true
         observeBehaviour()
         seedMediaArt()
+        seedActiveTimers()
         // Registered up front, not when a call starts: a dialer's leftover call notification has to
         // be recognisable as stale on the very first post we see of it.
         traceCall("listener connected; call state registered=${callStateMonitor.start(::onCallStateIdle)}")
@@ -206,6 +208,15 @@ class CutoutNotificationListenerService : NotificationListenerService() {
     private fun seedMediaArt() {
         val active = runCatching { activeNotifications }.getOrNull() ?: return
         active.sortedBy { it.postTime }.forEach { it.publishMediaArt() }
+    }
+
+    /** Rebuilds an already-running timer after the notification listener reconnects. */
+    private fun seedActiveTimers() {
+        val active = runCatching { activeNotifications }.getOrNull() ?: return
+        active.sortedBy { it.postTime }.forEach { sbn ->
+            val timer = TimerNotificationParser.tryParse(sbn, this) ?: return@forEach
+            handleTimer(sbn, timer)
+        }
     }
 
     /**
@@ -558,8 +569,10 @@ class CutoutNotificationListenerService : NotificationListenerService() {
             return
         }
 
-        if (TimerNotificationParser.isTimer(notification)) {
-            handleTimer(notification)
+        val previous = if (notification.key == currentTimerKey) RunningTimerBus.state.value else null
+        val timer = TimerNotificationParser.tryParse(notification, this, previous)
+        if (timer != null) {
+            handleTimer(notification, timer)
             return
         }
 
@@ -835,8 +848,7 @@ class CutoutNotificationListenerService : NotificationListenerService() {
      * first time a given timer appears — later re-posts refresh the countdown without re-popping.
      * Mirrors [handleCall].
      */
-    private fun handleTimer(sbn: StatusBarNotification) {
-        val timer = TimerNotificationParser.parse(sbn)
+    private fun handleTimer(sbn: StatusBarNotification, timer: ParsedTimer) {
         RunningTimerBus.update(
             RunningTimer(
                 endElapsedRealtimeMs = timer.endElapsedRealtimeMs,

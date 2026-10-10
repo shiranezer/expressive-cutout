@@ -1660,7 +1660,7 @@ private fun CollapsedContent(
         )
         // The timer tile shows the remaining time on the trailing edge, opposite its icon.
         if (event.timer != null && !isStickToCamera) {
-            timerRemainingText()?.let { remaining ->
+            timerRemainingText(event.packageName)?.let { remaining ->
                 Text(
                     text = remaining,
                     color = LocalContentColor.current,
@@ -2318,10 +2318,10 @@ private fun rememberAppIcon(packageName: String, themed: Boolean): LoadedAppIcon
  * timer is present. Reads [RunningTimerBus]: a running timer ticks down against
  * [SystemClock.elapsedRealtime] (re-derived a few times a second so the collapsed pill and expanded
  * card stay in sync), while a paused timer shows its frozen remainder without ticking. Seconds are
- * rounded up so a fresh 5:00 timer reads "5:00", and it lands on "0:00" exactly at zero.
+ * rounded up for other clock apps; Samsung Clock displays whole seconds without rounding up.
  */
 @Composable
-private fun timerRemainingText(): String? {
+private fun timerRemainingText(sourcePackage: String?): String? {
     val timer by RunningTimerBus.state.collectAsStateWithLifecycle()
     val t = timer ?: return null
     val end = t.endElapsedRealtimeMs
@@ -2337,7 +2337,12 @@ private fun timerRemainingText(): String? {
     } else {
         (t.pausedRemainingMs ?: return null).coerceAtLeast(0L)
     }
-    return formatCallDuration((remainingMs + 999L) / 1_000L)
+    val seconds = if (sourcePackage == "com.sec.android.app.clockpackage") {
+        remainingMs / 1_000L
+    } else {
+        (remainingMs + 999L) / 1_000L
+    }
+    return formatCallDuration(seconds)
 }
 
 /** Formats an elapsed timestamp into a relative time string (e.g. "Now", "5s ago", "2m ago", "2h ago", "1d ago"). */
@@ -4330,7 +4335,7 @@ private fun TimerExpandedContent(
                     }
                     // The remaining time is the headline; the timer's name (or "Timer") sits beneath.
                     Text(
-                        text = timerRemainingText() ?: event.label,
+                        text = timerRemainingText(event.packageName) ?: event.label,
                         color = LocalContentColor.current,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
