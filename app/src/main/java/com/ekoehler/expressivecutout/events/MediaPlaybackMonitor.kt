@@ -235,21 +235,22 @@ class MediaPlaybackMonitor(private val context: Context) {
      * Publishes its live state to [NowPlayingBus] and pops the island when a new track starts.
      */
     private fun sync() {
+        val disabledControllers = watched.keys.filter { it.packageName in disabledApps }
+        val assistantControllers = watched.keys.filter { isAssistantPackage(it.packageName) }
         val validControllers = watched.keys.filter { controller ->
-            if (controller.packageName in disabledApps) {
-                false
-            } else if (isAssistantPackage(controller.packageName)) {
-                // If Assistant tile is turned off, ignore assistant media session entirely
-                tileEnabled[DynamicTile.ASSISTANT] != false
-            } else {
-                true
-            }
+            isEligibleMusicSession(
+                isDisabled = controller in disabledControllers,
+                isAssistant = controller in assistantControllers,
+            )
         }
 
         val primary = validControllers.firstOrNull { it.isPlaying } ?: validControllers.firstOrNull()
         Log.d(
             TAG,
             "Session selection watched=${watched.size} eligible=${validControllers.size} " +
+                "disabled=${disabledControllers.joinToString { it.packageName }} " +
+                "assistants=${assistantControllers.joinToString { it.packageName }} " +
+                "musicTileEnabled=${tileEnabled[DynamicTile.MUSIC] != false} " +
                 "primary=${primary?.packageName ?: "none"} state=${primary?.playbackState?.state ?: "none"}",
         )
         if (primary == null) {
